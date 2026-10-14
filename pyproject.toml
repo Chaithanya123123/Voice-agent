@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nano-voice-agents"
+version = "1.0.0"
+description = "Voice-enabled customer support agent for Nano Voice Agents"
+requires-python = ">=3.12"
+
+dependencies = [
+    # LiveKit & Voice
+    "livekit-agents>=1.0",
+    "livekit-plugins-deepgram",
+    "livekit-plugins-inworld",
+    "livekit-plugins-langchain",
+
+    # LangChain & LLM
+    "langchain",
+    "langchain-mistralai",
+
+    # Vector DB & Embeddings
+    "qdrant-client",
+    "sentence-transformers",
+
+    # Document Processing
+    "docling",
+
+    # Utilities
+    "python-dotenv",
+    "pydantic-settings",
+
+    # Web API + UI
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "httpx",
+    "streamlit",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["langchain_agent", "voice_agent"]
