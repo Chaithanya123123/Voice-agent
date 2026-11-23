@@ -6,6 +6,19 @@ Built with **LiveKit Agents**, **LangChain + Mistral**, **Docling**, and **Qdran
 
 ---
 
+## Credit
+
+This project is adapted from [lauki-voice-agent](https://github.com/codebasics/lauki-voice-agent) by Codebasics (copyright notice kept below). The LiveKit agent, support tools, sample PDFs and original RAG flow come from that project.
+
+**What I added or changed:**
+
+- FastAPI service for chat, voice upload, document management and LiveKit tokens (`api.py`)
+- Streamlit console for uploading PDFs, inspecting chunks and chatting (`streamlit_app.py`)
+- Reworked ingestion: overlapping chunks, page metadata, and adding, listing or deleting single documents (`ingest.py`)
+- Switched the LLM from Groq to Mistral
+
+---
+
 ## Features
 
 - Live voice call via LiveKit (STT: Deepgram Nova-3, TTS: InWorld TTS-2)
