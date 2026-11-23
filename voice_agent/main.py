@@ -65,12 +65,11 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     await session.start(agent=NanoAgent(), room=ctx.room)
+    await session.generate_reply(user_input="Greet the user as Nano Voice Agents customer assistant and ask how you can help.")
 
 
 # Backwards-compat alias
 LaukiAgent = NanoAgent
-
-    await session.generate_reply(user_input="Greet the user as Nano Voice Agents customer assistant and ask how you can help.")
 
 
 if __name__ == "__main__":

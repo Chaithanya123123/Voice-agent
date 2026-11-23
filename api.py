@@ -5,17 +5,21 @@ Run:
 """
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
+from starlette.background import BackgroundTask
 
 from config import settings
 from ingest import (
@@ -46,8 +50,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Nano Voice Agents API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    # Browser origins allowed to call the API. The Streamlit console calls it from Python.
+    allow_origins=[
+        o.strip()
+        for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
+        if o.strip()
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -110,26 +118,20 @@ def chunks(source: str | None = None, limit: int = Query(100, ge=1, le=500)):
         raise HTTPException(500, f"Could not read chunks: {e}")
 
 
-def _ingest_saved_file(saved: Path):
-    client: QdrantClient = state["client"]
-    embedder: SentenceTransformer = state["embedder"]
-    ingest_single_file(saved, client=client, embedder=embedder)
-
-
+# Plain `def` so FastAPI runs the slow work in a thread and other requests keep responding.
 @app.post("/documents")
-async def upload_document(file: UploadFile = File(...), background: bool = False):
+def upload_document(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only .pdf files are accepted")
+    if file.file.read(5) != b"%PDF-":
+        raise HTTPException(400, "The file is not a valid PDF")
+    file.file.seek(0)
     docs_dir = Path(settings.docs_dir)
     docs_dir.mkdir(parents=True, exist_ok=True)
     dest = docs_dir / Path(file.filename).name
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    if background:
-        # Fire-and-forget is handled by caller polling /documents; here run inline
-        # in a thread to keep code simple (FastAPI will still block briefly).
-        pass
     try:
         result = ingest_single_file(dest, client=state["client"], embedder=state["embedder"])
     except Exception as e:
@@ -171,31 +173,42 @@ def chat(req: ChatRequest):
     return ChatResponse(answer=str(answer), context=context or "", sources=sources)
 
 
+def _whisper():
+    if "whisper" not in state:
+        from faster_whisper import WhisperModel
+
+        state["whisper"] = WhisperModel("small", device="cpu", compute_type="int8")
+    return state["whisper"]
+
+
+def header_text(value: str, limit: int) -> str:
+    """HTTP headers are ASCII-only, so percent-encode text such as rupee signs or Hindi."""
+    return quote(value[:limit], safe=" ")
+
+
 @app.post("/voice")
-async def voice(file: UploadFile = File(...), top_k: int = 5):
+def voice(file: UploadFile = File(...), top_k: int = Query(5, ge=1, le=10)):
     """Audio upload -> transcript -> chat answer.
 
     Requires optional deps (faster-whisper + edge-tts). If missing, returns
     501 with install hint — text chat still works.
     """
     try:
-        import edge_tts  # noqa: F401
-        from faster_whisper import WhisperModel  # noqa: F401
+        import edge_tts
+        import faster_whisper  # noqa: F401
     except ImportError:
         raise HTTPException(
             501,
             "Voice needs `uv add faster-whisper edge-tts`. "
             "Meanwhile use /chat (text) or the LiveKit web call.",
         )
-    from faster_whisper import WhisperModel
 
     suffix = Path(file.filename or "audio.webm").suffix or ".webm"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
     try:
-        model = WhisperModel("small", device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(tmp_path)
+        segments, _ = _whisper().transcribe(tmp_path)
         transcript = " ".join(s.text for s in segments).strip()
         if not transcript:
             raise HTTPException(400, "Could not transcribe audio")
@@ -205,18 +218,21 @@ async def voice(file: UploadFile = File(...), top_k: int = 5):
             transcript, top_k=top_k, client=state["client"],
             embedder=state["embedder"], style="voice",
         )
-        # TTS to mp3 bytes
-        import edge_tts
-
         tts_path = tmp_path + ".mp3"
         tts = edge_tts.Communicate(str(answer), voice="en-IN-NeerjaNeural")
-        await tts.save(tts_path)
-        from fastapi.responses import FileResponse
-
+        tts.save_sync(tts_path)
         return FileResponse(
             tts_path, media_type="audio/mpeg", filename="reply.mp3",
-            headers={"X-Transcript": transcript[:500], "X-Answer": str(answer)[:1000]},
+            headers={
+                "X-Transcript": header_text(transcript, 500),
+                "X-Answer": header_text(str(answer), 1000),
+            },
+            background=BackgroundTask(lambda: Path(tts_path).unlink(missing_ok=True)),
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Voice request failed: {e}")
     finally:
         try:
             Path(tmp_path).unlink(missing_ok=True)

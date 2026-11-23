@@ -6,10 +6,25 @@ Run:
 """
 from __future__ import annotations
 
+from urllib.parse import quote, unquote
+
 import httpx
 import streamlit as st
 
-API = st.sidebar.text_input("API URL", "http://127.0.0.1:8000")
+API = st.sidebar.text_input("API URL", "http://127.0.0.1:8000").rstrip("/")
+
+
+def request(method: str, path: str, **kwargs) -> httpx.Response | None:
+    """Call the API and show a readable message instead of a crash when it fails."""
+    try:
+        return httpx.request(method, f"{API}{path}", **kwargs)
+    except httpx.TimeoutException:
+        st.error("The API took too long to respond. Please try again.")
+    except httpx.HTTPError as e:
+        st.error(f"Cannot reach the API at {API}: {e}")
+    return None
+
+
 st.title("Nano Voice Agents — Support Console 🎙️📄")
 
 # ---------------------------------------------------------------- health
@@ -30,10 +45,12 @@ with tab_upload:
         prog = st.progress(0)
         for i, f in enumerate(files):
             with st.spinner(f"Uploading {f.name}…"):
-                r = httpx.post(
-                    f"{API}/documents", files={"file": (f.name, f.getvalue())},
+                r = request(
+                    "POST", "/documents", files={"file": (f.name, f.getvalue())},
                     timeout=300,
                 )
+                if r is None:
+                    continue
                 if r.status_code == 200:
                     res = r.json()
                     st.success(f"{f.name}: {res.get('chunks')} chunks")
@@ -55,8 +72,11 @@ with tab_upload:
             c1, c2 = st.columns([4, 1])
             c1.write(f"📄 **{d['source']}** — {d['chunks']} chunks")
             if c2.button("Delete", key=f"del-{d['source']}"):
-                httpx.delete(f"{API}/documents/{d['source']}", timeout=60)
-                st.rerun()
+                r = request("DELETE", f"/documents/{quote(d['source'], safe='')}", timeout=60)
+                if r is not None and r.status_code == 200:
+                    st.rerun()
+                elif r is not None:
+                    st.error(r.text[:500])
     except Exception as e:
         st.warning(f"Could not list documents: {e}")
 
@@ -96,14 +116,16 @@ with tab_chat:
             st.audio(audio_bytes)
             if st.button("Transcribe + Answer"):
                 with st.spinner("Voice → text → RAG…"):
-                    r = httpx.post(
-                        f"{API}/voice", files={"file": ("q.webm", audio_bytes)},
+                    r = request(
+                        "POST", "/voice", files={"file": ("question.wav", audio_bytes)},
                         params={"top_k": top_k}, timeout=300,
                     )
-                    if r.status_code == 200:
+                    if r is None:
+                        pass
+                    elif r.status_code == 200:
                         st.audio(r.content, format="audio/mp3")
-                        st.info(f"Transcript: {r.headers.get('X-Transcript','')}")
-                        st.success(r.headers.get("X-Answer", "")[:1000])
+                        st.info(f"Transcript: {unquote(r.headers.get('X-Transcript', ''))}")
+                        st.success(unquote(r.headers.get("X-Answer", "")))
                     elif r.status_code == 501:
                         st.warning(
                             r.json().get("detail")
@@ -120,12 +142,14 @@ with tab_chat:
     if query:
         st.chat_message("user").write(query)
         with st.spinner("Retrieving…"):
-            r = httpx.post(
-                f"{API}/chat",
+            r = request(
+                "POST", "/chat",
                 json={"query": query, "top_k": top_k, "style": "text"},
                 timeout=120,
             )
-        if r.status_code == 200:
+        if r is None:
+            pass
+        elif r.status_code == 200:
             data = r.json()
             st.chat_message("assistant").write(data["answer"])
             with st.expander("Sources"):
